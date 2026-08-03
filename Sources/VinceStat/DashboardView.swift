@@ -1,0 +1,224 @@
+import ServiceManagement
+import SwiftUI
+
+struct DashboardView: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        @Bindable var state = state
+        VStack(alignment: .leading, spacing: 12) {
+            claudeSection
+            Divider()
+            systemSection
+            Divider()
+            settingsSection(minutes: $state.claudeRefreshMinutes, threshold: $state.warnThresholdPercent)
+            Divider()
+            footer
+        }
+        .padding(14)
+        .frame(width: 340)
+    }
+
+    // MARK: - Claude
+
+    @ViewBuilder
+    private var claudeSection: some View {
+        HStack {
+            Text("Claude").font(.headline)
+            Spacer()
+            if state.isRefreshing {
+                ProgressView().controlSize(.small)
+            }
+            Button {
+                state.refreshClaude()
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .buttonStyle(.borderless)
+            .help("지금 갱신")
+        }
+
+        if let usage = state.usage {
+            switch usage.source {
+            case .api:
+                if let window = usage.fiveHour {
+                    usageGauge(title: "5시간 블록", window: window)
+                }
+                if let window = usage.sevenDay {
+                    usageGauge(title: "주간", window: window)
+                }
+                if let window = usage.sevenDayOpus {
+                    usageGauge(title: "주간 (Opus)", window: window)
+                }
+            case .estimate:
+                if let tokens = usage.estimatedTokensUsed5h {
+                    HStack {
+                        Text("최근 5시간 사용 (추정)")
+                        Spacer()
+                        Text("~\(AppState.shortTokens(tokens)) tok")
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.callout)
+                }
+                Text("usage API 조회 실패 — 로컬 추정치입니다")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+        } else {
+            Text("사용량 정보를 아직 가져오지 못했습니다")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+
+        if let error = state.usageError {
+            Text(error)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+
+        if let refreshed = state.lastRefresh {
+            Text("마지막 갱신 \(refreshed.formatted(date: .omitted, time: .shortened))")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private func usageGauge(title: String, window: ClaudeUsage.Window) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text(title).font(.callout)
+                Spacer()
+                Text("잔여 \(Int(window.remainingPercent.rounded()))%")
+                    .font(.callout)
+                    .monospacedDigit()
+                    .foregroundStyle(
+                        window.utilizationPercent >= state.warnThresholdPercent
+                            ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary)
+                    )
+            }
+            ProgressView(value: window.utilizationPercent, total: 100)
+                .tint(window.utilizationPercent >= state.warnThresholdPercent ? .orange : .accentColor)
+            if let resetsAt = window.resetsAt {
+                Text("리셋 \(resetsAt.formatted(date: .omitted, time: .shortened)) (\(resetsAt, style: .relative) 후)")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    // MARK: - 시스템
+
+    @ViewBuilder
+    private var systemSection: some View {
+        metricRow(
+            label: "CPU",
+            value: String(format: "%.0f%%", state.cpuPercent),
+            history: state.cpuHistory,
+            maxValue: 100
+        )
+        metricRow(
+            label: "MEM",
+            value: String(format: "%.0f%% (%.1f/%.0fG)", state.memPercent, state.memUsedGB, state.memTotalGB),
+            history: state.memHistory,
+            maxValue: state.memTotalGB
+        )
+    }
+
+    private func metricRow(label: String, value: String, history: [Double], maxValue: Double) -> some View {
+        HStack(spacing: 10) {
+            Text(label)
+                .font(.callout.weight(.medium))
+                .frame(width: 40, alignment: .leading)
+            Sparkline(values: history, maxValue: maxValue)
+                .frame(height: 18)
+            Text(value)
+                .font(.callout)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 60, alignment: .trailing)
+        }
+    }
+
+    // MARK: - 설정
+
+    private func settingsSection(minutes: Binding<Int>, threshold: Binding<Double>) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Claude 갱신 주기")
+                Spacer()
+                Stepper(value: minutes, in: 1...30) {
+                    Text("\(minutes.wrappedValue)분").monospacedDigit()
+                }
+                .fixedSize()
+            }
+            .font(.callout)
+
+            HStack {
+                Text("경고 임계값")
+                Slider(value: threshold, in: 50...95, step: 5)
+                Text("\(Int(threshold.wrappedValue))%")
+                    .monospacedDigit()
+                    .frame(width: 36, alignment: .trailing)
+            }
+            .font(.callout)
+
+            Toggle("로그인 시 시작", isOn: launchAtLoginBinding)
+                .font(.callout)
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+        }
+    }
+
+    private var launchAtLoginBinding: Binding<Bool> {
+        Binding(
+            get: { SMAppService.mainApp.status == .enabled },
+            set: { enable in
+                // 번들(.app) 밖에서 실행 중이면 실패할 수 있음 — 무시
+                if enable {
+                    try? SMAppService.mainApp.register()
+                } else {
+                    try? SMAppService.mainApp.unregister()
+                }
+            }
+        )
+    }
+
+    // MARK: - 푸터
+
+    private var footer: some View {
+        HStack {
+            Text("VinceStat").font(.caption2).foregroundStyle(.tertiary)
+            Spacer()
+            Button("종료") { NSApplication.shared.terminate(nil) }
+                .font(.callout)
+        }
+    }
+}
+
+struct Sparkline: View {
+    let values: [Double]
+    let maxValue: Double
+
+    var body: some View {
+        GeometryReader { geo in
+            if values.count > 1 {
+                Path { path in
+                    let stepX = geo.size.width / CGFloat(values.count - 1)
+                    for (index, value) in values.enumerated() {
+                        let x = CGFloat(index) * stepX
+                        let ratio = maxValue > 0 ? min(value / maxValue, 1) : 0
+                        let y = geo.size.height * (1 - CGFloat(ratio))
+                        if index == 0 {
+                            path.move(to: CGPoint(x: x, y: y))
+                        } else {
+                            path.addLine(to: CGPoint(x: x, y: y))
+                        }
+                    }
+                }
+                .stroke(.tint, lineWidth: 1.5)
+            }
+        }
+    }
+}
