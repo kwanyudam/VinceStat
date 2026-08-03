@@ -29,6 +29,11 @@ struct DashboardView: View {
             if state.isRefreshing {
                 ProgressView().controlSize(.small)
             }
+            if let refreshed = state.lastRefresh {
+                Text("\(refreshed, style: .relative) 전 동기화")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
             Button {
                 state.refreshClaude()
             } label: {
@@ -49,6 +54,9 @@ struct DashboardView: View {
                 }
                 if let window = usage.sevenDayOpus {
                     usageGauge(title: "주간 (Opus)", window: window)
+                }
+                ForEach(usage.scopedWeekly, id: \.name) { scoped in
+                    usageGauge(title: "주간 (\(scoped.name))", window: scoped.window)
                 }
             case .estimate:
                 if let tokens = usage.estimatedTokensUsed5h {
@@ -76,12 +84,6 @@ struct DashboardView: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
-        }
-
-        if let refreshed = state.lastRefresh {
-            Text("마지막 갱신 \(refreshed.formatted(date: .omitted, time: .shortened))")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
         }
     }
 
