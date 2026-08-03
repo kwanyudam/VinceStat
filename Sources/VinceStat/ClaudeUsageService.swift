@@ -15,10 +15,17 @@ struct ClaudeUsage {
         case estimate   // 로컬 JSONL 기반 추정 (사용 토큰 수만 앎)
     }
 
+    /// limits 배열의 weekly_scoped 항목 — 모델별 주간 한도 (예: Fable)
+    struct ScopedWindow {
+        let name: String
+        let window: Window
+    }
+
     var source: Source
     var fiveHour: Window?
     var sevenDay: Window?
     var sevenDayOpus: Window?
+    var scopedWeekly: [ScopedWindow] = []
     /// estimate 모드: 최근 5시간 동안 사용한 토큰 수
     var estimatedTokensUsed5h: Int?
 }
@@ -72,10 +79,32 @@ final class ClaudeUsageService {
         usage.fiveHour = parseWindow(json["five_hour"])
         usage.sevenDay = parseWindow(json["seven_day"])
         usage.sevenDayOpus = parseWindow(json["seven_day_opus"])
+        usage.scopedWeekly = parseScopedWeekly(json["limits"])
         guard usage.fiveHour != nil || usage.sevenDay != nil else {
             throw ClaudeUsageError.badResponse
         }
         return usage
+    }
+
+    /// limits 배열에서 모델 스코프가 붙은 주간 한도(weekly_scoped)를 추출한다.
+    private func parseScopedWeekly(_ value: Any?) -> [ClaudeUsage.ScopedWindow] {
+        guard let limits = value as? [[String: Any]] else { return [] }
+        return limits.compactMap { limit in
+            guard limit["kind"] as? String == "weekly_scoped",
+                  let scope = limit["scope"] as? [String: Any],
+                  let model = scope["model"] as? [String: Any],
+                  let name = model["display_name"] as? String,
+                  let raw = limit["percent"] as? Double
+                      ?? (limit["percent"] as? Int).map(Double.init)
+            else { return nil }
+            return ClaudeUsage.ScopedWindow(
+                name: name,
+                window: ClaudeUsage.Window(
+                    utilizationPercent: min(100, max(0, raw)),
+                    resetsAt: (limit["resets_at"] as? String).flatMap(Self.parseISODate)
+                )
+            )
+        }
     }
 
     private func parseWindow(_ value: Any?) -> ClaudeUsage.Window? {
