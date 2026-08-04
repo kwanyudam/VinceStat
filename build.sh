@@ -12,7 +12,17 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cp Support/Info.plist "$APP/Contents/Info.plist"
 cp .build/release/VinceStat "$APP/Contents/MacOS/VinceStat"
-codesign --force --sign - "$APP"
+
+# 고정 identity가 있으면 그것으로, 없으면 ad-hoc 서명
+# (ad-hoc은 빌드마다 서명이 바뀌어 Keychain "항상 허용"이 유지되지 않음)
+CERT_NAME="VinceStat Signing"
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "$CERT_NAME"; then
+  codesign --force --sign "$CERT_NAME" "$APP"
+else
+  echo "⚠️  '$CERT_NAME' 인증서가 없어 ad-hoc 서명합니다."
+  echo "   재빌드마다 Keychain 팝업이 다시 뜨지 않게 하려면: ./setup-signing.sh (최초 1회)"
+  codesign --force --sign - "$APP"
+fi
 
 echo "빌드 완료: $APP"
 
