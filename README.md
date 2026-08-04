@@ -31,17 +31,46 @@ open dist/VinceStat.app
 1. `./setup-signing.sh` — "VinceStat Signing" 자체 인증서를 생성해 로그인 키체인에 등록한다.
    신뢰 등록 단계에서 macOS 암호 확인 창이 한 번 뜰 수 있다.
 2. `./build.sh install` — 인증서가 있으면 자동으로 고정 서명, 없으면 ad-hoc 서명으로 폴백.
-3. 앱 실행 후 Keychain 허용 팝업에서 **"항상 허용"** — 이후로는 재빌드해도 다시 묻지 않는다.
+3. 대시보드 → **인증**에서 장기 토큰을 넣어 둔다(아래 참조). 그러면 Keychain 팝업이 아예 뜨지 않는다.
 
-## Keychain 안내
+## 인증 / Keychain 팝업
 
-Claude Code는 자격증명을 Keychain 항목 `Claude Code-credentials`에 저장한다.
-VinceStat이 처음 이를 읽을 때 macOS 허용 대화상자가 뜨며, **"항상 허용"**을 눌러야
-이후 갱신 때 다시 묻지 않는다. 거부하면 로컬 추정 모드로만 동작한다.
+### 팝업이 반복해서 뜨는 이유
 
-ad-hoc 서명(`codesign --sign -`)은 빌드마다 서명이 달라져 macOS가 새 빌드를 다른 앱으로
-취급하므로 "항상 허용"이 유지되지 않는다. `./setup-signing.sh` 로 만든 고정 identity
-("VinceStat Signing")로 서명하면 서명 주체가 동일해 재빌드 후에도 권한이 유지된다.
+Claude Code는 자격증명을 Keychain 항목 `Claude Code-credentials`에 저장하는데, **토큰을
+갱신할 때마다 그 항목을 삭제하고 다시 만든다.** 항목이 새로 생기면 ACL도 새로 생기므로
+직전에 누른 "항상 허용"이 같이 날아가고, 다음 폴링에서 대화상자가 다시 뜬다.
+즉 이 항목의 ACL에 의존하는 한 "한 번만 허용"은 원리적으로 불가능하다.
+
+(고정 코드서명 identity는 별개의 필요 조건이다. ad-hoc 서명은 빌드마다 서명이 달라져
+macOS가 새 빌드를 다른 앱으로 취급하므로, `./setup-signing.sh` 로 만든
+"VinceStat Signing" identity 로 서명해야 VinceStat 자체 Keychain 항목 접근도 유지된다.)
+
+### 해결: 자체 토큰 보관
+
+VinceStat은 자격증명을 다음 순서로 찾는다. 1~3은 팝업이 뜨지 않는다.
+
+1. **VinceStat 자체 Keychain 항목** (`com.vince.vincestat.token`) — 생성자가 VinceStat
+   자신이라 읽을 때 대화상자가 뜨지 않는다.
+2. `~/.claude/.credentials.json` (파일 저장 방식을 쓰는 머신)
+3. **Claude Code Keychain 항목** — 대화상자가 뜰 수 있는 유일한 경로. 여기서 읽은 토큰은
+   곧바로 1번 항목에 복사해 두므로, 그 토큰이 만료될 때까지 다시 묻지 않는다.
+
+팝업을 완전히 없애려면 만료가 긴 토큰을 한 번 넣어 두면 된다.
+
+```sh
+claude setup-token    # 출력된 토큰을 복사
+```
+
+대시보드 → **인증** → 토큰 붙여넣기 → 저장. 이후 VinceStat은 1번 경로만 쓰므로
+Claude Code Keychain 항목을 건드리지 않는다. Claude Code 자신의 토큰 로테이션과도
+분리되어 서로 간섭하지 않는다.
+
+### 거부했을 때
+
+대화상자에서 "거부"를 누르면 그 사실을 기억해 **자동 갱신에서는 다시 묻지 않는다**
+(로컬 추정 모드로 동작). 다시 시도하려면 대시보드의 갱신 버튼(↻)이나
+**인증 → 다시 시도**를 누른다 — 사용자가 명시적으로 요청한 경우에만 묻는다.
 
 ## 구조
 
@@ -50,7 +79,8 @@ Sources/VinceStat/
 ├── VinceStatApp.swift        # MenuBarExtra 진입점
 ├── AppState.swift            # @Observable 상태 + 타이머 + 메뉴바 텍스트 조립
 ├── SystemStatsService.swift  # CPU/메모리 샘플러 (Mach)
-├── ClaudeUsageService.swift  # usage API + Keychain/파일 자격증명 + JSONL 추정 폴백
+├── ClaudeUsageService.swift  # usage API + 자격증명 조회 순서 + JSONL 추정 폴백
+├── TokenStore.swift          # VinceStat 자체 Keychain 항목 (팝업 없는 토큰 보관소)
 └── DashboardView.swift       # 팝오버 대시보드 (SwiftUI)
 Support/Info.plist            # LSUIElement 등 번들 메타
 build.sh                      # .app 번들 생성 스크립트 (고정 identity 서명, 없으면 ad-hoc)
