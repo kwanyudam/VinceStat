@@ -3,6 +3,8 @@ import SwiftUI
 
 struct DashboardView: View {
     @Environment(AppState.self) private var state
+    @State private var tokenInput = ""
+    @State private var showAuth = false
 
     var body: some View {
         @Bindable var state = state
@@ -12,6 +14,8 @@ struct DashboardView: View {
             systemSection
             Divider()
             settingsSection(minutes: $state.claudeRefreshMinutes, threshold: $state.warnThresholdPercent)
+            Divider()
+            authSection
             Divider()
             footer
         }
@@ -35,7 +39,7 @@ struct DashboardView: View {
                     .foregroundStyle(.tertiary)
             }
             Button {
-                state.refreshClaude()
+                state.refreshClaude(userInitiated: true)
             } label: {
                 Image(systemName: "arrow.clockwise")
             }
@@ -185,6 +189,67 @@ struct DashboardView: View {
                 }
             }
         )
+    }
+
+    // MARK: - 인증
+
+    /// Claude Code 는 토큰을 갱신할 때마다 Keychain 항목을 삭제·재생성하므로 그 항목에 준
+    /// "항상 허용"은 유지되지 않는다. `claude setup-token` 으로 받은 장기 토큰을 여기에 한 번
+    /// 넣어 두면 VinceStat 자체 항목에서만 읽으므로 팝업이 다시 뜨지 않는다.
+    @ViewBuilder
+    private var authSection: some View {
+        DisclosureGroup(isExpanded: $showAuth) {
+            VStack(alignment: .leading, spacing: 8) {
+                if state.keychainDenied {
+                    HStack(spacing: 6) {
+                        Text("Keychain 접근이 거부된 상태입니다")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                        Spacer()
+                        Button("다시 시도") { state.retryKeychain() }
+                            .font(.caption)
+                    }
+                }
+
+                if state.hasManualToken {
+                    HStack {
+                        Label("장기 토큰 저장됨", systemImage: "checkmark.seal")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                        Spacer()
+                        Button("삭제") { state.clearStoredToken() }
+                            .font(.caption)
+                    }
+                } else {
+                    Text("터미널에서 `claude setup-token` 을 실행해 나온 토큰을 붙여넣으면 이후 Keychain 팝업이 뜨지 않습니다.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 6) {
+                        SecureField("sk-ant-oat01-…", text: $tokenInput)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.caption)
+                        Button("저장") {
+                            state.saveManualToken(tokenInput)
+                            tokenInput = ""
+                        }
+                        .font(.caption)
+                        .disabled(tokenInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+            }
+            .padding(.top, 6)
+        } label: {
+            HStack {
+                Text("인증").font(.callout)
+                Spacer()
+                Text(state.authStatusText)
+                    .font(.caption2)
+                    .foregroundStyle(state.keychainDenied ? AnyShapeStyle(.orange) : AnyShapeStyle(.tertiary))
+                    .lineLimit(1)
+            }
+        }
+        .font(.callout)
     }
 
     // MARK: - 푸터

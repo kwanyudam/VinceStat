@@ -28,20 +28,56 @@ struct ClaudeUsage {
     var scopedWeekly: [ScopedWindow] = []
     /// estimate 모드: 최근 5시간 동안 사용한 토큰 수
     var estimatedTokensUsed5h: Int?
+    /// 이번 조회에 쓴 자격증명 출처 (대시보드 표시용)
+    var credentialSource: CredentialSource?
+}
+
+/// 자격증명을 어디서 얻었는지. 팝업이 뜨는 경로는 `claudeCodeKeychain` 뿐이다.
+enum CredentialSource: String {
+    /// VinceStat 자체 Keychain 항목의 장기 토큰 (`claude setup-token`) — 팝업 없음
+    case manualToken
+    /// VinceStat 자체 Keychain 항목에 복사해 둔 Claude Code 토큰 — 팝업 없음
+    case mirroredToken
+    /// ~/.claude/.credentials.json — 팝업 없음
+    case credentialsFile
+    /// Claude Code 의 Keychain 항목 — 허용 대화상자가 뜰 수 있음
+    case claudeCodeKeychain
+
+    var label: String {
+        switch self {
+        case .manualToken: return "장기 토큰 (setup-token)"
+        case .mirroredToken: return "복사된 Claude Code 토큰"
+        case .credentialsFile: return "~/.claude/.credentials.json"
+        case .claudeCodeKeychain: return "Claude Code Keychain"
+        }
+    }
 }
 
 enum ClaudeUsageError: LocalizedError {
     case noCredentials
+    case keychainSkipped
+    case keychainDenied
     case tokenExpired
+    case tokenRejected
     case httpError(Int)
     case badResponse
 
     var errorDescription: String? {
         switch self {
-        case .noCredentials: return "Claude Code 자격증명을 찾지 못했습니다"
-        case .tokenExpired: return "OAuth 토큰이 만료되었습니다 (Claude Code를 한 번 실행하면 갱신됩니다)"
-        case .httpError(let code): return "usage API 오류 (HTTP \(code))"
-        case .badResponse: return "usage API 응답을 해석하지 못했습니다"
+        case .noCredentials:
+            return "Claude Code 자격증명을 찾지 못했습니다"
+        case .keychainSkipped:
+            return "Keychain 접근이 거부된 상태라 자동 조회를 건너뜁니다 (대시보드에서 다시 시도)"
+        case .keychainDenied:
+            return "Keychain 접근이 거부되었습니다 — 다시 묻지 않습니다"
+        case .tokenExpired:
+            return "OAuth 토큰이 만료되었습니다 (Claude Code를 한 번 실행하면 갱신됩니다)"
+        case .tokenRejected:
+            return "토큰이 거부되었습니다 (401) — 장기 토큰을 다시 발급해 주세요"
+        case .httpError(let code):
+            return "usage API 오류 (HTTP \(code))"
+        case .badResponse:
+            return "usage API 응답을 해석하지 못했습니다"
         }
     }
 }
@@ -50,24 +86,31 @@ enum ClaudeUsageError: LocalizedError {
 /// 실패 시 ~/.claude/projects JSONL 로컬 추정으로 폴백한다.
 final class ClaudeUsageService {
     private let usageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
+    private let tokenStore = TokenStore()
 
     // MARK: - API 경로
 
-    func fetchFromAPI() async throws -> ClaudeUsage {
-        guard let creds = loadCredentials() else { throw ClaudeUsageError.noCredentials }
-        if let expiresAt = creds.expiresAt, expiresAt < Date() {
-            throw ClaudeUsageError.tokenExpired
-        }
+    /// - Parameter allowKeychainPrompt: Claude Code Keychain 항목을 읽어도 되는지.
+    ///   false 면 허용 대화상자가 뜰 수 있는 경로를 아예 타지 않는다.
+    func fetchFromAPI(allowKeychainPrompt: Bool) async throws -> ClaudeUsage {
+        let credentials = try loadCredentials(allowKeychainPrompt: allowKeychainPrompt)
 
         var request = URLRequest(url: usageURL)
-        request.setValue("Bearer \(creds.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
         request.timeoutInterval = 15
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw ClaudeUsageError.badResponse }
         guard http.statusCode == 200 else {
-            if http.statusCode == 401 { throw ClaudeUsageError.tokenExpired }
+            if http.statusCode == 401 {
+                // 복사해 둔 토큰이 거부되면 버려서 다음 갱신에 원본을 다시 읽게 한다.
+                // 사용자가 직접 넣은 장기 토큰은 지우지 않고 오류만 알린다.
+                if credentials.source == .mirroredToken { tokenStore.clear() }
+                throw credentials.source == .manualToken
+                    ? ClaudeUsageError.tokenRejected
+                    : ClaudeUsageError.tokenExpired
+            }
             throw ClaudeUsageError.httpError(http.statusCode)
         }
 
@@ -76,6 +119,7 @@ final class ClaudeUsageService {
         }
 
         var usage = ClaudeUsage(source: .api)
+        usage.credentialSource = credentials.source
         usage.fiveHour = parseWindow(json["five_hour"])
         usage.sevenDay = parseWindow(json["seven_day"])
         usage.sevenDayOpus = parseWindow(json["seven_day_opus"])
@@ -123,17 +167,30 @@ final class ClaudeUsageService {
 
     private struct Credentials {
         let accessToken: String
-        let expiresAt: Date?
+        let source: CredentialSource
     }
 
-    private func loadCredentials() -> Credentials? {
-        // 1) 파일 (~/.claude/.credentials.json) — Keychain 프롬프트 없이 읽힘
+    /// 팝업이 없는 경로를 먼저 모두 시도하고, Claude Code Keychain 은 최후에 한 번만 본다.
+    /// 거기서 읽은 토큰은 VinceStat 자체 항목에 복사해 두므로 만료 전까지 다시 묻지 않는다.
+    private func loadCredentials(allowKeychainPrompt: Bool) throws -> Credentials {
+        // 1) VinceStat 자체 Keychain 항목 — 우리가 만든 항목이라 대화상자가 뜨지 않는다
+        if let stored = tokenStore.load(), stored.isValid() {
+            return Credentials(
+                accessToken: stored.accessToken,
+                source: stored.origin == .manual ? .manualToken : .mirroredToken
+            )
+        }
+
+        // 2) 파일 (~/.claude/.credentials.json) — 파일 권한만 있으면 읽힌다
         let fileURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude/.credentials.json")
-        if let data = try? Data(contentsOf: fileURL), let creds = parseCredentials(data) {
-            return creds
+        if let data = try? Data(contentsOf: fileURL), let parsed = parseClaudeCodeCredentials(data) {
+            return Credentials(accessToken: parsed.accessToken, source: .credentialsFile)
         }
-        // 2) Keychain "Claude Code-credentials" — 최초 접근 시 macOS 허용 대화상자가 뜬다
+
+        // 3) Claude Code Keychain 항목 — macOS 허용 대화상자가 뜰 수 있는 유일한 경로
+        guard allowKeychainPrompt else { throw ClaudeUsageError.keychainSkipped }
+
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "Claude Code-credentials",
@@ -141,20 +198,49 @@ final class ClaudeUsageService {
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
         var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data
-        else { return nil }
-        return parseCredentials(data)
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        switch status {
+        case errSecSuccess:
+            break
+        case errSecUserCanceled, errSecAuthFailed, errSecInteractionNotAllowed:
+            throw ClaudeUsageError.keychainDenied
+        default:
+            throw ClaudeUsageError.noCredentials
+        }
+        guard let data = item as? Data, let parsed = parseClaudeCodeCredentials(data) else {
+            throw ClaudeUsageError.noCredentials
+        }
+        if let expiresAt = parsed.expiresAt, expiresAt < Date() {
+            throw ClaudeUsageError.tokenExpired
+        }
+        // 복사해 두면 이 토큰이 만료될 때까지 Claude Code 항목을 다시 읽지 않는다
+        tokenStore.save(
+            StoredToken(accessToken: parsed.accessToken, expiresAt: parsed.expiresAt, origin: .mirror)
+        )
+        return Credentials(accessToken: parsed.accessToken, source: .claudeCodeKeychain)
     }
 
-    private func parseCredentials(_ data: Data) -> Credentials? {
+    private func parseClaudeCodeCredentials(_ data: Data) -> (accessToken: String, expiresAt: Date?)? {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let oauth = json["claudeAiOauth"] as? [String: Any],
               let token = oauth["accessToken"] as? String
         else { return nil }
         let expiresAt = (oauth["expiresAt"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
-        return Credentials(accessToken: token, expiresAt: expiresAt)
+        return (token, expiresAt)
     }
+
+    // MARK: - 자체 토큰 관리 (대시보드에서 호출)
+
+    /// `claude setup-token` 으로 받은 장기 토큰을 저장한다.
+    func saveManualToken(_ raw: String) {
+        let token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else { return }
+        tokenStore.save(StoredToken(accessToken: token, expiresAt: nil, origin: .manual))
+    }
+
+    func storedToken() -> StoredToken? { tokenStore.load() }
+
+    func clearStoredToken() { tokenStore.clear() }
 
     // MARK: - 로컬 추정 폴백
 
