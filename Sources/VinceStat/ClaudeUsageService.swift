@@ -59,7 +59,9 @@ enum ClaudeUsageError: LocalizedError {
     case keychainDenied
     case tokenExpired
     case tokenRejected
-    case httpError(Int)
+    case manualTokenUnsupported
+    case rateLimited(retryAfter: TimeInterval?, detail: String?)
+    case httpError(Int, detail: String?)
     case badResponse
 
     var errorDescription: String? {
@@ -67,15 +69,20 @@ enum ClaudeUsageError: LocalizedError {
         case .noCredentials:
             return "Claude Code 자격증명을 찾지 못했습니다"
         case .keychainSkipped:
-            return "Keychain 접근이 거부된 상태라 자동 조회를 건너뜁니다 (대시보드에서 다시 시도)"
+            return "토큰이 만료되어 추정 모드입니다 — ↻ 를 누르면 Keychain 접근을 요청합니다"
         case .keychainDenied:
             return "Keychain 접근이 거부되었습니다 — 다시 묻지 않습니다"
         case .tokenExpired:
             return "OAuth 토큰이 만료되었습니다 (Claude Code를 한 번 실행하면 갱신됩니다)"
         case .tokenRejected:
             return "토큰이 거부되었습니다 (401) — 장기 토큰을 다시 발급해 주세요"
-        case .httpError(let code):
-            return "usage API 오류 (HTTP \(code))"
+        case .manualTokenUnsupported:
+            return "장기 토큰(setup-token)은 usage API가 받지 않습니다 (429) — 인증 → 삭제 후 Claude Code 토큰을 쓰세요"
+        case .rateLimited(let retryAfter, let detail):
+            let wait = retryAfter.map { " — \(Int($0.rounded()))초 후 재시도" } ?? " — 잠시 후 재시도"
+            return "usage API 요청 한도 초과 (429)\(wait)" + (detail.map { " · \($0)" } ?? "")
+        case .httpError(let code, let detail):
+            return "usage API 오류 (HTTP \(code))" + (detail.map { " · \($0)" } ?? "")
         case .badResponse:
             return "usage API 응답을 해석하지 못했습니다"
         }
@@ -111,7 +118,18 @@ final class ClaudeUsageService {
                     ? ClaudeUsageError.tokenRejected
                     : ClaudeUsageError.tokenExpired
             }
-            throw ClaudeUsageError.httpError(http.statusCode)
+            if http.statusCode == 429 {
+                // 장기 토큰은 이 엔드포인트에서 상시 429 로 거절된다 (2026-08-06 확인).
+                // 일시적 레이트리밋과 구분해서 알려 줘야 사용자가 기다리다 시간을 버리지 않는다.
+                if credentials.source == .manualToken { throw ClaudeUsageError.manualTokenUnsupported }
+                let retryAfter = (http.value(forHTTPHeaderField: "retry-after"))
+                    .flatMap(TimeInterval.init)
+                throw ClaudeUsageError.rateLimited(
+                    retryAfter: retryAfter,
+                    detail: Self.errorDetail(from: data)
+                )
+            }
+            throw ClaudeUsageError.httpError(http.statusCode, detail: Self.errorDetail(from: data))
         }
 
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -128,6 +146,15 @@ final class ClaudeUsageService {
             throw ClaudeUsageError.badResponse
         }
         return usage
+    }
+
+    /// 오류 응답 본문(`{"type":"error","error":{"type":…,"message":…}}`)에서 원인 한 줄을 뽑는다.
+    private static func errorDetail(from data: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let error = json["error"] as? [String: Any]
+        else { return nil }
+        let parts = [error["type"] as? String, error["message"] as? String].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: ": ")
     }
 
     /// limits 배열에서 모델 스코프가 붙은 주간 한도(weekly_scoped)를 추출한다.
