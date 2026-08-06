@@ -193,9 +193,11 @@ struct DashboardView: View {
 
     // MARK: - 인증
 
-    /// Claude Code 는 토큰을 갱신할 때마다 Keychain 항목을 삭제·재생성하므로 그 항목에 준
-    /// "항상 허용"은 유지되지 않는다. `claude setup-token` 으로 받은 장기 토큰을 여기에 한 번
-    /// 넣어 두면 VinceStat 자체 항목에서만 읽으므로 팝업이 다시 뜨지 않는다.
+    /// 평소에는 VinceStat 자체 항목의 미러 토큰만 읽으므로 팝업이 뜨지 않는다. 그 토큰이 만료되면
+    /// Claude Code 항목을 다시 읽어야 하는데, 그 조회는 사용자가 ↻ 를 누를 때만 일어난다.
+    ///
+    /// 장기 토큰(`claude setup-token`) 입력란은 남겨 두되 권하지 않는다 — usage API 가 그 토큰을
+    /// 상시 429 로 거절한다(2026-08-06 확인).
     @ViewBuilder
     private var authSection: some View {
         DisclosureGroup(isExpanded: $showAuth) {
@@ -221,7 +223,7 @@ struct DashboardView: View {
                             .font(.caption)
                     }
                 } else {
-                    Text("터미널에서 `claude setup-token` 을 실행해 나온 토큰을 붙여넣으면 이후 Keychain 팝업이 뜨지 않습니다.")
+                    Text("`claude setup-token` 장기 토큰은 usage API 가 429 로 거절합니다 — 넣지 마세요. 평소에는 복사해 둔 Claude Code 토큰으로 동작하고, 만료되면 ↻ 를 누를 때만 Keychain 허용을 묻습니다.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

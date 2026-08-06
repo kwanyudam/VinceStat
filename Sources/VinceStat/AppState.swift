@@ -17,13 +17,15 @@ final class AppState {
     var usageError: String?
     var lastRefresh: Date?
     var isRefreshing = false
-    /// Keychain 허용 대화상자를 사용자가 거부한 적이 있으면 자동 갱신에서 다시 묻지 않는다.
-    /// 대시보드의 "다시 시도"나 수동 갱신 버튼으로만 해제된다.
+    /// 마지막 Keychain 허용 대화상자에서 사용자가 거부했는지 (대시보드 표시용).
+    /// 자동 갱신은 이 값과 무관하게 애초에 대화상자를 띄우지 않는다 — `refreshClaude` 참고.
     var keychainDenied: Bool {
         didSet { UserDefaults.standard.set(keychainDenied, forKey: "keychainDenied") }
     }
     /// 저장된 자체 토큰 (있으면 Keychain 팝업 경로를 아예 타지 않는다)
     private(set) var storedToken: StoredToken?
+    /// 429 를 받으면 이 시각까지 자동 갱신을 건너뛴다 (수동 갱신은 그대로 허용).
+    private(set) var rateLimitedUntil: Date?
     /// 메뉴바 카운트다운 표시용 현재 시각 (3초 틱, 1분 미만 카운트다운 시 1초 틱)
     private(set) var now = Date()
 
@@ -178,24 +180,32 @@ final class AppState {
         claudeTimer?.tolerance = 10
     }
 
-    /// - Parameter userInitiated: 사용자가 직접 누른 갱신인지. 이때는 Keychain 을 거부한
-    ///   이력이 있어도 한 번 더 물어본다(사용자가 명시적으로 요청했으므로).
+    /// - Parameter userInitiated: 사용자가 직접 누른 갱신인지.
+    ///   **Keychain 허용 대화상자는 이때만 뜬다.** 타이머·앱 시작 같은 자동 갱신은 미러 토큰이
+    ///   만료됐어도 Claude Code 항목을 읽지 않고 조용히 추정 모드로 내려간다. 팝업이 예고 없이
+    ///   튀어나오는 대신 사용자가 ↻ 를 누른 순간에만 뜨게 하기 위함이다.
     func refreshClaude(userInitiated: Bool = false) {
         guard !isRefreshing else { return }
+        // 429 백오프 중이면 자동 갱신은 건너뛴다 (사용자가 직접 누른 갱신은 통과)
+        if !userInitiated, let until = rateLimitedUntil, until > Date() { return }
         isRefreshing = true
         let service = claudeService
-        let allowPrompt = userInitiated || !keychainDenied
+        let allowPrompt = userInitiated
         Task {
             defer { isRefreshing = false }
             do {
                 let result = try await service.fetchFromAPI(allowKeychainPrompt: allowPrompt)
                 usage = result
                 usageError = nil
+                rateLimitedUntil = nil
                 lastRefresh = Date()
                 if result.credentialSource == .claudeCodeKeychain { keychainDenied = false }
                 storedToken = service.storedToken()
             } catch {
                 if case ClaudeUsageError.keychainDenied = error { keychainDenied = true }
+                if case ClaudeUsageError.rateLimited(let retryAfter, _) = error {
+                    rateLimitedUntil = Date().addingTimeInterval(retryAfter ?? 600)
+                }
                 usageError = error.localizedDescription
                 storedToken = service.storedToken()
                 // 폴백: 로컬 JSONL 추정 (파일 IO라 백그라운드에서)
@@ -215,11 +225,12 @@ final class AppState {
     /// 현재 자격증명 상태 한 줄 요약
     var authStatusText: String {
         if let stored = storedToken {
-            return stored.origin == .manual
-                ? "장기 토큰 사용 중 — Keychain 팝업 없음"
-                : "Claude Code 토큰을 복사해 사용 중"
+            if stored.origin == .manual { return "장기 토큰 사용 중 — usage API 가 거절합니다 (삭제 권장)" }
+            return stored.isValid()
+                ? "Claude Code 토큰을 복사해 사용 중 — 팝업 없음"
+                : "복사해 둔 토큰이 만료됨 — ↻ 를 누르면 Keychain 허용을 한 번 묻습니다"
         }
-        if keychainDenied { return "Keychain 접근 거부됨 — 추정 모드로만 동작합니다" }
+        if keychainDenied { return "Keychain 접근 거부됨 — ↻ 를 누르면 다시 묻습니다" }
         return usage?.credentialSource?.label ?? "자격증명 없음"
     }
 
