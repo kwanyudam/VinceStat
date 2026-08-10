@@ -24,6 +24,10 @@ final class AppState {
     }
     /// 저장된 자체 토큰 (있으면 Keychain 팝업 경로를 아예 타지 않는다)
     private(set) var storedToken: StoredToken?
+    /// VinceStat 자체 OAuth 로그인 토큰 — 있으면 만료 전에 스스로 갱신하므로 팝업이 영구히 없다
+    private(set) var oauthToken: StoredToken?
+    var isLoggingIn = false
+    var loginError: String?
     /// 429 를 받으면 이 시각까지 자동 갱신을 건너뛴다 (수동 갱신은 그대로 허용).
     private(set) var rateLimitedUntil: Date?
     /// 메뉴바 카운트다운 표시용 현재 시각 (3초 틱, 1분 미만 카운트다운 시 1초 틱)
@@ -55,6 +59,7 @@ final class AppState {
         warnThresholdPercent = savedThreshold > 0 ? savedThreshold : 80
         keychainDenied = defaults.bool(forKey: "keychainDenied")
         storedToken = claudeService.storedToken()
+        oauthToken = claudeService.oauthToken()
 
         startSystemTimer()
         restartClaudeTimer()
@@ -180,7 +185,10 @@ final class AppState {
         claudeTimer?.tolerance = 10
     }
 
-    /// - Parameter userInitiated: 사용자가 직접 누른 갱신인지.
+    /// 자체 OAuth 로그인이 되어 있으면 이 값과 무관하게 팝업이 뜨지 않는다 — 토큰을 스스로
+    /// refresh 하므로 Claude Code Keychain 을 읽지 않는다.
+    ///
+    /// - Parameter userInitiated: 사용자가 직접 누른 갱신인지. 로그인하지 않은 폴백 상태에서
     ///   **Keychain 허용 대화상자는 이때만 뜬다.** 타이머·앱 시작 같은 자동 갱신은 미러 토큰이
     ///   만료됐어도 Claude Code 항목을 읽지 않고 조용히 추정 모드로 내려간다. 팝업이 예고 없이
     ///   튀어나오는 대신 사용자가 ↻ 를 누른 순간에만 뜨게 하기 위함이다.
@@ -201,6 +209,7 @@ final class AppState {
                 lastRefresh = Date()
                 if result.credentialSource == .claudeCodeKeychain { keychainDenied = false }
                 storedToken = service.storedToken()
+                oauthToken = service.oauthToken()
             } catch {
                 if case ClaudeUsageError.keychainDenied = error { keychainDenied = true }
                 if case ClaudeUsageError.rateLimited(let retryAfter, _) = error {
@@ -208,6 +217,7 @@ final class AppState {
                 }
                 usageError = error.localizedDescription
                 storedToken = service.storedToken()
+                oauthToken = service.oauthToken()
                 // 폴백: 로컬 JSONL 추정 (파일 IO라 백그라운드에서)
                 let estimated = await Task.detached(priority: .utility) {
                     service.estimateTokensUsedLast5h()
@@ -222,8 +232,16 @@ final class AppState {
 
     // MARK: - 인증
 
+    /// 자체 OAuth 로그인이 살아 있는지 (= Keychain 팝업이 뜰 일이 없는 상태)
+    var hasOAuthLogin: Bool { oauthToken?.refreshToken != nil }
+
+    /// 로그인했지만 refresh token 이 죽어서 다시 로그인해야 하는 상태
+    var oauthNeedsRelogin: Bool { oauthToken != nil && oauthToken?.refreshToken == nil }
+
     /// 현재 자격증명 상태 한 줄 요약
     var authStatusText: String {
+        if hasOAuthLogin { return "자체 OAuth 로그인 — 자동 갱신, 팝업 없음" }
+        if oauthNeedsRelogin { return "로그인이 만료됨 — 다시 로그인해 주세요" }
         if let stored = storedToken {
             if stored.origin == .manual { return "장기 토큰 사용 중 — usage API 가 거절합니다 (삭제 권장)" }
             return stored.isValid()
@@ -235,6 +253,46 @@ final class AppState {
     }
 
     var hasManualToken: Bool { storedToken?.origin == .manual }
+
+    /// 브라우저로 Anthropic 로그인 → VinceStat 전용 토큰 쌍 발급.
+    /// 이후로는 만료 전에 스스로 refresh 하므로 Keychain 허용 창이 뜨지 않는다.
+    func loginWithAnthropic() {
+        performLogin { try await self.claudeService.loginWithOAuth() }
+    }
+
+    /// 리다이렉트를 못 받는 경우용: 인증 페이지를 열고 코드를 붙여넣게 한다.
+    func openPastedLoginPage() {
+        loginError = nil
+        NSWorkspace.shared.open(claudeService.pastedLoginURL())
+    }
+
+    func completePastedLogin(_ code: String) {
+        performLogin { try await self.claudeService.completePastedLogin(code) }
+    }
+
+    private func performLogin(_ work: @escaping () async throws -> Void) {
+        guard !isLoggingIn else { return }
+        isLoggingIn = true
+        loginError = nil
+        Task {
+            defer { isLoggingIn = false }
+            do {
+                try await work()
+                oauthToken = claudeService.oauthToken()
+                keychainDenied = false
+                refreshClaude()
+            } catch {
+                loginError = error.localizedDescription
+                oauthToken = claudeService.oauthToken()
+            }
+        }
+    }
+
+    func logoutOAuth() {
+        claudeService.logoutOAuth()
+        oauthToken = nil
+        loginError = nil
+    }
 
     /// `claude setup-token` 으로 받은 장기 토큰을 저장하고 바로 갱신한다.
     func saveManualToken(_ raw: String) {
