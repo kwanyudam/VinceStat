@@ -5,6 +5,8 @@ struct DashboardView: View {
     @Environment(AppState.self) private var state
     @State private var tokenInput = ""
     @State private var showAuth = false
+    @State private var showPastedLogin = false
+    @State private var pastedCode = ""
 
     var body: some View {
         @Bindable var state = state
@@ -193,15 +195,22 @@ struct DashboardView: View {
 
     // MARK: - 인증
 
-    /// 평소에는 VinceStat 자체 항목의 미러 토큰만 읽으므로 팝업이 뜨지 않는다. 그 토큰이 만료되면
-    /// Claude Code 항목을 다시 읽어야 하는데, 그 조회는 사용자가 ↻ 를 누를 때만 일어난다.
+    /// 권장 경로는 **자체 OAuth 로그인**이다 — VinceStat 전용 토큰 쌍을 받아 만료 전에 스스로
+    /// 갱신하므로 Claude Code Keychain 을 읽지 않고, 따라서 허용 대화상자가 영구히 뜨지 않는다.
     ///
-    /// 장기 토큰(`claude setup-token`) 입력란은 남겨 두되 권하지 않는다 — usage API 가 그 토큰을
-    /// 상시 429 로 거절한다(2026-08-06 확인).
+    /// 로그인하지 않은 경우의 폴백은 예전과 같다: 복사해 둔 Claude Code 토큰 → 만료되면 ↻ 를
+    /// 누를 때만 Keychain 허용을 묻는다.
+    ///
+    /// 장기 토큰(`claude setup-token`) 입력란은 남겨 두되 권하지 않는다 — 그 토큰은
+    /// `user:inference` 스코프만 가져서 usage API 가 상시 429 로 거절한다(2026-08-06 확인).
     @ViewBuilder
     private var authSection: some View {
         DisclosureGroup(isExpanded: $showAuth) {
             VStack(alignment: .leading, spacing: 8) {
+                oauthLoginRows
+
+                Divider()
+
                 if state.keychainDenied {
                     HStack(spacing: 6) {
                         Text("Keychain 접근이 거부된 상태입니다")
@@ -252,6 +261,86 @@ struct DashboardView: View {
             }
         }
         .font(.callout)
+    }
+
+    /// 자체 OAuth 로그인 상태 + 로그인/로그아웃. 로그인해 두면 팝업이 아예 사라진다.
+    @ViewBuilder
+    private var oauthLoginRows: some View {
+        if state.hasOAuthLogin {
+            HStack {
+                Label("Anthropic 로그인됨 — 자동 갱신", systemImage: "checkmark.seal.fill")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+                Spacer()
+                Button("로그아웃") { state.logoutOAuth() }
+                    .font(.caption)
+            }
+            if let expiresAt = state.oauthToken?.expiresAt {
+                Text("토큰 만료 \(expiresAt, style: .relative) 후 — 만료 전에 스스로 갱신합니다")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        } else {
+            Text(
+                state.oauthNeedsRelogin
+                    ? "로그인이 만료되었습니다. 다시 로그인하면 Keychain 허용 창 없이 계속 동작합니다."
+                    : "Anthropic 계정으로 한 번 로그인하면 VinceStat 전용 토큰을 발급받아 스스로 갱신합니다 — Keychain 허용 창이 더 이상 뜨지 않습니다."
+            )
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 6) {
+                Button(state.oauthNeedsRelogin ? "다시 로그인" : "Anthropic 계정으로 로그인") {
+                    state.loginWithAnthropic()
+                }
+                .font(.caption)
+                .disabled(state.isLoggingIn)
+                if state.isLoggingIn {
+                    ProgressView().controlSize(.small)
+                    Text("브라우저에서 로그인을 마쳐 주세요")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            DisclosureGroup(isExpanded: $showPastedLogin) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("인증 페이지를 열고, 화면에 표시된 코드를 그대로 붙여넣으세요.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("인증 페이지 열기") { state.openPastedLoginPage() }
+                        .font(.caption)
+                    HStack(spacing: 6) {
+                        TextField("코드 붙여넣기", text: $pastedCode)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.caption)
+                        Button("완료") {
+                            state.completePastedLogin(pastedCode)
+                            pastedCode = ""
+                        }
+                        .font(.caption)
+                        .disabled(
+                            pastedCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                || state.isLoggingIn
+                        )
+                    }
+                }
+                .padding(.top, 4)
+            } label: {
+                Text("브라우저가 되돌아오지 않을 때")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+
+        if let loginError = state.loginError {
+            Text(loginError)
+                .font(.caption2)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     // MARK: - 푸터

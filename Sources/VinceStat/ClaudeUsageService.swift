@@ -34,6 +34,8 @@ struct ClaudeUsage {
 
 /// 자격증명을 어디서 얻었는지. 팝업이 뜨는 경로는 `claudeCodeKeychain` 뿐이다.
 enum CredentialSource: String {
+    /// VinceStat 자체 OAuth 로그인 토큰 — 만료 전에 스스로 갱신하므로 팝업이 영구히 없음
+    case ownOAuth
     /// VinceStat 자체 Keychain 항목의 장기 토큰 (`claude setup-token`) — 팝업 없음
     case manualToken
     /// VinceStat 자체 Keychain 항목에 복사해 둔 Claude Code 토큰 — 팝업 없음
@@ -45,6 +47,7 @@ enum CredentialSource: String {
 
     var label: String {
         switch self {
+        case .ownOAuth: return "VinceStat 자체 OAuth (자동 갱신)"
         case .manualToken: return "장기 토큰 (setup-token)"
         case .mirroredToken: return "복사된 Claude Code 토큰"
         case .credentialsFile: return "~/.claude/.credentials.json"
@@ -94,13 +97,15 @@ enum ClaudeUsageError: LocalizedError {
 final class ClaudeUsageService {
     private let usageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
     private let tokenStore = TokenStore()
+    private let oauthStore = TokenStore(service: TokenStore.oauthService)
+    private let oauth = OAuthService()
 
     // MARK: - API 경로
 
     /// - Parameter allowKeychainPrompt: Claude Code Keychain 항목을 읽어도 되는지.
     ///   false 면 허용 대화상자가 뜰 수 있는 경로를 아예 타지 않는다.
     func fetchFromAPI(allowKeychainPrompt: Bool) async throws -> ClaudeUsage {
-        let credentials = try loadCredentials(allowKeychainPrompt: allowKeychainPrompt)
+        let credentials = try await loadCredentials(allowKeychainPrompt: allowKeychainPrompt)
 
         var request = URLRequest(url: usageURL)
         request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
@@ -114,6 +119,9 @@ final class ClaudeUsageService {
                 // 복사해 둔 토큰이 거부되면 버려서 다음 갱신에 원본을 다시 읽게 한다.
                 // 사용자가 직접 넣은 장기 토큰은 지우지 않고 오류만 알린다.
                 if credentials.source == .mirroredToken { tokenStore.clear() }
+                // 자체 OAuth 토큰이 예상보다 일찍 죽은 경우: 만료로 표시해 두면
+                // 다음 갱신에서 refresh token 으로 조용히 새로 받아 온다.
+                if credentials.source == .ownOAuth { expireStoredOAuthToken() }
                 throw credentials.source == .manualToken
                     ? ClaudeUsageError.tokenRejected
                     : ClaudeUsageError.tokenExpired
@@ -199,7 +207,14 @@ final class ClaudeUsageService {
 
     /// 팝업이 없는 경로를 먼저 모두 시도하고, Claude Code Keychain 은 최후에 한 번만 본다.
     /// 거기서 읽은 토큰은 VinceStat 자체 항목에 복사해 두므로 만료 전까지 다시 묻지 않는다.
-    private func loadCredentials(allowKeychainPrompt: Bool) throws -> Credentials {
+    private func loadCredentials(allowKeychainPrompt: Bool) async throws -> Credentials {
+        // 0) VinceStat 자체 OAuth 토큰 — 만료가 가까우면 refresh token 으로 스스로 갱신한다.
+        //    이 경로가 살아 있는 동안에는 Claude Code Keychain 을 아예 읽지 않으므로
+        //    허용 대화상자가 뜰 일이 없다.
+        if let token = try await currentOwnOAuthToken() {
+            return Credentials(accessToken: token, source: .ownOAuth)
+        }
+
         // 1) VinceStat 자체 Keychain 항목 — 우리가 만든 항목이라 대화상자가 뜨지 않는다
         if let stored = tokenStore.load(), stored.isValid() {
             return Credentials(
@@ -255,6 +270,86 @@ final class ClaudeUsageService {
         let expiresAt = (oauth["expiresAt"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
         return (token, expiresAt)
     }
+
+    // MARK: - 자체 OAuth 토큰 (팝업 없는 자동 갱신 경로)
+
+    /// 쓸 수 있는 자체 OAuth access token. 만료가 가까우면 refresh 를 먼저 돌린다.
+    /// 로그인이 없거나 갱신이 불가능하면 nil 을 돌려주고, 호출자는 아래 폴백 경로로 내려간다.
+    private func currentOwnOAuthToken() async throws -> String? {
+        guard let stored = oauthStore.load(), stored.origin == .oauth else { return nil }
+        if !stored.needsRefresh() { return stored.accessToken }
+        guard let refreshToken = stored.refreshToken else { return nil }  // 재로그인 필요 상태
+
+        do {
+            let tokens = try await oauth.refresh(refreshToken: refreshToken)
+            oauthStore.save(
+                StoredToken(
+                    accessToken: tokens.accessToken,
+                    // 로테이션되면 새 refresh token 으로 교체, 안 오면 기존 것을 계속 쓴다
+                    refreshToken: tokens.refreshToken ?? refreshToken,
+                    expiresAt: tokens.expiresAt,
+                    origin: .oauth
+                )
+            )
+            return tokens.accessToken
+        } catch OAuthError.invalidGrant {
+            // refresh token 이 죽었다 — 다시 로그인해야 한다. 항목은 남겨 두고 refresh 만
+            // 비워서 대시보드가 "재로그인 필요"를 구분해 보여줄 수 있게 한다.
+            oauthStore.save(
+                StoredToken(
+                    accessToken: stored.accessToken,
+                    refreshToken: nil,
+                    expiresAt: .distantPast,
+                    origin: .oauth
+                )
+            )
+            return nil
+        } catch {
+            // 네트워크 등 일시적 실패: 토큰을 건드리지 않고 폴백 경로로 내려간다
+            return nil
+        }
+    }
+
+    /// 401 을 받았을 때 다음 갱신이 refresh 를 타도록 만료 표시만 해 둔다.
+    private func expireStoredOAuthToken() {
+        guard let stored = oauthStore.load(), stored.origin == .oauth else { return }
+        oauthStore.save(
+            StoredToken(
+                accessToken: stored.accessToken,
+                refreshToken: stored.refreshToken,
+                expiresAt: .distantPast,
+                origin: .oauth
+            )
+        )
+    }
+
+    /// 브라우저 로그인(루프백 콜백) — 성공하면 토큰 쌍을 자체 Keychain 항목에 넣는다.
+    func loginWithOAuth() async throws {
+        try store(tokens: try await oauth.login())
+    }
+
+    /// 리다이렉트를 못 받는 환경용: 인증 페이지 URL 을 받아 브라우저로 직접 연다.
+    func pastedLoginURL() -> URL { oauth.pastedLoginURL() }
+
+    /// 인증 페이지가 보여 준 코드로 로그인을 마무리한다.
+    func completePastedLogin(_ pasted: String) async throws {
+        try store(tokens: try await oauth.completePastedLogin(pasted))
+    }
+
+    private func store(tokens: OAuthTokens) throws {
+        oauthStore.save(
+            StoredToken(
+                accessToken: tokens.accessToken,
+                refreshToken: tokens.refreshToken,
+                expiresAt: tokens.expiresAt,
+                origin: .oauth
+            )
+        )
+    }
+
+    func oauthToken() -> StoredToken? { oauthStore.load() }
+
+    func logoutOAuth() { oauthStore.clear() }
 
     // MARK: - 자체 토큰 관리 (대시보드에서 호출)
 
