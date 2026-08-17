@@ -190,10 +190,12 @@ final class ClaudeUsageService {
         guard let dict = value as? [String: Any] else { return nil }
         guard let raw = dict["utilization"] as? Double ?? (dict["utilization"] as? Int).map(Double.init)
         else { return nil }
-        // 스키마 방어: 0~1 분수로 오면 %로 환산
-        let percent = raw <= 1.0 ? raw * 100 : raw
+        // utilization 은 limits[].percent 와 같은 0~100 퍼센트다. 예전에 "0~1 분수로 오면
+        // %로 환산" 하는 방어 코드가 있었는데, **사용률 1% 를 분수 1.0 으로 오인해** 100%
+        // 로 부풀렸다 — 잔여 0% 가 되어 메뉴바가 리셋 카운트다운으로 바뀌었다.
+        // 1 이 "1%" 인지 "100%" 인지 값만 보고는 구분할 수 없으므로 추측하지 않는다.
         return ClaudeUsage.Window(
-            utilizationPercent: min(100, max(0, percent)),
+            utilizationPercent: min(100, max(0, raw)),
             resetsAt: (dict["resets_at"] as? String).flatMap(Self.parseISODate)
         )
     }
