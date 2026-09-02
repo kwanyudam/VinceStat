@@ -14,6 +14,7 @@ macOS 메뉴바에 세 가지 수치를 상시 표시하는 개인용 상태바 
   - API 조회 실패 시(토큰 만료, 스키마 변경 등) `~/.claude/projects/**/*.jsonl`을 파싱해 최근 5시간 사용 토큰 추정치(`✳ ~1.2M`)로 폴백.
 - **대시보드**(메뉴바 클릭): 5시간/주간/Opus 게이지 + 리셋 시각, CPU·메모리 스파크라인(최근 5분), 갱신 주기·경고 임계값 설정, 지금 갱신, 로그인 시 시작.
 - 경고 임계값(기본 80%) 초과 시 메뉴바에 `⚠` 표시.
+- **데스크톱 펫**(대시보드에서 켜기/끄기): 화면에 떠 있는 리아코가 발밑에 Claude 잔여를 띄우고, 잔여가 줄면 느려지다가 졸고 얼어붙는다. 마우스오버하면 CPU·MEM 이 펼쳐지고, 우클릭하면 대시보드가 뜬다. 아래 "데스크톱 펫" 참고.
 
 ## 빌드 / 실행
 
@@ -127,11 +128,112 @@ Sources/VinceStat/
 ├── ClaudeUsageService.swift  # usage API + 자격증명 조회 순서 + JSONL 추정 폴백
 ├── OAuthService.swift        # 자체 OAuth 로그인 (PKCE + 루프백 콜백 서버) + refresh
 ├── TokenStore.swift          # VinceStat 자체 Keychain 항목 (팝업 없는 토큰 보관소)
-└── DashboardView.swift       # 팝오버 대시보드 (SwiftUI)
+├── DashboardView.swift       # 팝오버 대시보드 (SwiftUI)
+├── PetController.swift       # 펫 창 수명 관리 + 우클릭 대시보드 팝오버
+├── PetWindow.swift           # 테두리 없는 투명 always-on-top 창
+├── PetView.swift             # 프레임 재생 + 마우스 조작 + AppState 읽기
+├── PetSpriteSheet.swift      # spritesheet.png 를 애니메이션별 프레임으로 슬라이스
+├── PetManifest.swift         # pet.json (.codex-pet 매니페스트) 파서
+├── PetAnimation.swift        # 상황 → 재생할 행 선택 (순수 함수)
+├── PetHUD.swift              # 발밑 수치 패널 + 갱신 카운트다운
+├── PetVitality.swift         # Claude 잔여 % → 재생 속도 배수 (순수 계산)
+├── PetDebugLog.swift         # VINCESTAT_PET_DEBUG 진단 로그
+└── Resources/                # spritesheet.png + pet.json (리아코 번들)
 Support/Info.plist            # LSUIElement 등 번들 메타
 build.sh                      # .app 번들 생성 스크립트 (고정 identity 서명, 없으면 ad-hoc)
 setup-signing.sh              # 코드서명용 자체 인증서 생성/등록 (머신당 최초 1회)
 ```
+
+## 데스크톱 펫 (리아코)
+
+대시보드의 **펫 표시** 스위치로 켠다. 켜면 화면에 리아코(Totodile)가 떠서 모든 Space 에서 다른 창
+위에 보이고, 드래그해서 어디로든(다른 모니터 포함) 옮길 수 있다. 위치는 기억한다. 끄면 창뿐 아니라
+재생 타이머까지 없앤다.
+
+메뉴바 숫자는 메뉴바를 봐야 읽히고, 대시보드 게이지는 열어야 보인다. 펫은 그 사이를 메운다 —
+**시선을 주지 않아도 주변시로 잡히는 채널**이라서, 잔량이 줄었다는 걸 숫자가 아니라 움직임의
+둔함과 표정으로 먼저 알아채게 하는 것이 목적이다.
+
+스프라이트는 [connor-pet](https://github.com/Connor-Supplies/connor-pet) 의
+`totodile.codex-pet` 번들(800×1800, 4칸 × 9행, 프레임 200×200)을 그대로 가져왔다.
+`Sources/VinceStat/Resources/` 의 `spritesheet.png` + `pet.json` 두 파일만 갈아끼우면 다른
+`.codex-pet` 번들로 바꿀 수 있다 — 로더가 Orca 의 매니페스트 스키마를 그대로 읽는다.
+
+### 발밑 패널
+
+펫 바로 아래에 **Claude 수치만** 한 줄(`✳ 31%`) 띄운다. 펫은 흘긋 보는 물건이라 상시 정보가
+많으면 배경 소음이 된다. CPU·MEM 은 **마우스를 올렸을 때만** 아랫줄로 펼친다.
+
+다음 Claude 갱신까지 **60초 이하로 남으면** 카운트다운(`↻ 41s`)이 한 줄 더 붙는다. 기준 시각은
+반복 타이머의 다음 발화 시각(`AppState.nextClaudeRefreshAt`)이라, ↻ 수동 갱신을 눌러도 주기가
+밀리지 않는다. 임계값은 `PetHUD.countdownLeadTime` 하나만 고치면 된다.
+
+임의의 배경 위에 뜨므로 시스템 색을 따르지 않고 반투명 검정 캡슐 + 흰 글자로 고정한다.
+
+### 우클릭 — 대시보드
+
+펫을 우클릭하면 메뉴바에서 쓰는 것과 **같은** `DashboardView` 가 팝오버로 뜬다. 메뉴를 따로
+만들지 않은 이유는 두 벌을 유지하면 반드시 어긋나기 때문이다.
+
+팝오버 안의 입력란(토큰·코드 붙여넣기)이 키 입력을 받아야 하므로 이때만 펫 창이 key 창이 된다
+(`PetWindow.wantsKey`). 평소에는 `canBecomeKey` 가 false 라, 펫을 만져도 터미널·에디터의 포커스를
+뺏지 않는다.
+
+### 잔여량에 따른 상태 (PetVitality + PetAnimation)
+
+5시간 블록 잔여 %가 **재생 속도**와 **어떤 행을 재생할지** 둘 다를 정한다. 리아코 시트에는
+포켓몬 상태이상 스킨이 이미 구워져 있어서, 그것을 잔량 단계에 그대로 붙였다.
+
+| 잔여 | 속도 배수 | 모습 |
+| --- | --- | --- |
+| 60% 이상 | 1.0 | 정면, 평소 |
+| 60 → 30% | 1.0 → 0.7 (선형) | 서서히 둔해짐 |
+| 30 → 10% | 0.7 → 0.4 | **졸음** — 어두운 `idle` 행 |
+| 10 → 0% | 0.4 → 0.25 | **얼어붙음** — 얼음 스킨 `waiting` 행 |
+
+임계값에서 뚝 끊지 않고 60%부터 서서히 깎다가 30% 아래에서 기울기를 급하게 꺾었다. 30% 하나로
+on/off 하면 29%가 되는 순간에만 알아채는데, 그러면 "미리 알려준다"는 목적을 못 채운다.
+
+로컬 JSONL 추정 모드에서는 플랜 한도 대비 %를 알 수 없어 `petRemainingPercent` 가 `nil` 이고,
+이때는 활력을 깎지 않는다 — 데이터가 없다는 이유로 느려지면 "잔량이 떨어졌다"로 오독된다.
+
+### 상태별 재생 행
+
+우선순위는 **조작 → 작업 → 잔량** 순이다. 만지고 있을 때는 그 반응이 먼저 보여야 하고, 잔량은
+가만히 두었을 때 드러나면 충분하다.
+
+| 상황 | 재생 행 | 방향 |
+| --- | --- | --- |
+| 평상시 | `jumping` (row 4) | 정면 — 얼굴이 보인다 |
+| 마우스 호버 | `waving` (row 3) | 반대편으로 돌아섬 |
+| Claude 갱신 중 | `running` (row 7) | 정면 |
+| 드래그 | `running-left` / `running-right` | 커서 방향 |
+| 잔여 30% 이하 | `idle` (row 0) | 졸음 스킨 |
+| 잔여 10% 이하 | `waiting` (row 6) | 얼음 스킨 |
+
+시트의 행 이름은 Orca 펫 규약을 따른 것이라 여기서 쓰는 의미와 다르다 — 이름이 아니라 **실제 그림의
+방향과 스킨**을 기준으로 골랐다.
+
+### 디버깅
+
+```sh
+VINCESTAT_PET_DEBUG=1 ./dist/VinceStat.app/Contents/MacOS/VinceStat
+VINCESTAT_PET_REMAINING=25 ./dist/VinceStat.app/Contents/MacOS/VinceStat   # 잔여 % 강제 주입
+```
+
+펫이 안 보일 때는 대개 창이 다른 모니터나 화면 밖에 생긴 경우다. `VINCESTAT_PET_DEBUG=1` 이
+찍는 `show frame=… screens=…` 로 좌표를 먼저 확인한다. 스프라이트 번들이 `.app` 에 안 들어가도
+조용히 안 뜨는데, 그 경우도 같은 로그가 알려준다.
+
+**주의: `swift run`/`swift build` 로 만든 디버그 바이너리는 코드서명이 없다.** 그래서 실행할
+때마다 macOS 가 새 앱으로 취급해 Keychain 허용 창을 다시 띄우고, "항상 허용"을 눌러도 다음
+빌드에서 또 뜬다. **테스트도 `./build.sh` 로 만든 `dist/VinceStat.app` 을 쓰는 편이 낫다** —
+고정 identity 로 서명되므로 팝업이 뜨지 않는다.
+
+### 스프라이트 크레딧
+
+캐릭터 스프라이트는 Nintendo/Game Freak/Creatures Inc. 의 포켓몬 에셋을 PokeAPI 경유로 받아
+connor-pet 이 시트로 구운 것이다. 개인 용도로만 쓰고 독립된 에셋으로 재배포하지 않는다.
 
 ## 알려진 한계
 
@@ -139,3 +241,4 @@ setup-signing.sh              # 코드서명용 자체 인증서 생성/등록 (
 - **자체 OAuth 토큰만** 스스로 리프레시한다. 폴백 경로의 미러 토큰(Claude Code에서 복사한 것)은 리프레시하지 않는다 — Claude Code의 토큰 로테이션과 충돌하지 않기 위해서다. 그 경우 Claude Code를 한 번 실행하면 갱신된다.
 - 자체 OAuth 토큰이 usage API에서 429로 거절될 가능성은 남아 있다(스코프 가설이 틀렸을 경우). 그때는 폴백 경로가 그대로 동작하고, 인증 탭에서 로그아웃하면 예전 동작으로 돌아간다.
 - 로컬 추정치는 5시간 윈도우 내 토큰 합산일 뿐 실제 플랜 한도 대비 %가 아니다.
+- 펫 창은 스프라이트와 수치 패널 영역에서만 마우스를 받고 나머지 투명 여백은 클릭을 통과시키지만, 판정이 20Hz 폴링이라 경계에서 최대 50ms 늦게 반영된다.

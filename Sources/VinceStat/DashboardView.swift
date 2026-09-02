@@ -15,7 +15,11 @@ struct DashboardView: View {
             Divider()
             systemSection
             Divider()
-            settingsSection(minutes: $state.claudeRefreshMinutes, threshold: $state.warnThresholdPercent)
+            settingsSection(
+                minutes: $state.claudeRefreshMinutes,
+                threshold: $state.warnThresholdPercent,
+                pet: $state.petEnabled
+            )
             Divider()
             authSection
             Divider()
@@ -151,7 +155,11 @@ struct DashboardView: View {
 
     // MARK: - 설정
 
-    private func settingsSection(minutes: Binding<Int>, threshold: Binding<Double>) -> some View {
+    private func settingsSection(
+        minutes: Binding<Int>,
+        threshold: Binding<Double>,
+        pet: Binding<Bool>
+    ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Claude 갱신 주기")
@@ -176,6 +184,18 @@ struct DashboardView: View {
                 .font(.callout)
                 .toggleStyle(.switch)
                 .controlSize(.mini)
+
+            Toggle("펫 표시", isOn: pet)
+                .font(.callout)
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+
+            if pet.wrappedValue {
+                Text("리아코가 화면에 떠서 발밑에 Claude 잔여를 띄웁니다. 다음 갱신 1분 전부터 카운트다운이 붙고, 마우스를 올리면 CPU · MEM 이 펼쳐집니다. 잔여 \(Int(PetVitality.healthyThreshold))% 아래부터 느려지다가 \(Int(PetVitality.sluggishThreshold))% 이하면 졸고 \(Int(PetVitality.exhaustedThreshold))% 이하면 얼어붙습니다. 드래그해서 옮기고, 우클릭하면 이 대시보드가 뜹니다.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 

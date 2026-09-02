@@ -9,9 +9,18 @@ swift build -c release
 
 APP=dist/VinceStat.app
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp Support/Info.plist "$APP/Contents/Info.plist"
 cp .build/release/VinceStat "$APP/Contents/MacOS/VinceStat"
+
+# SPM 리소스 번들(펫 스프라이트)을 Contents/Resources 로. Bundle.module 이 Bundle.main.resourceURL
+# 아래를 뒤지므로 여기 있어야 찾는다. 없으면 펫이 조용히 안 뜬다.
+BUNDLE=.build/release/VinceStat_VinceStat.bundle
+if [[ -d "$BUNDLE" ]]; then
+  cp -R "$BUNDLE" "$APP/Contents/Resources/"
+else
+  echo "⚠️  $BUNDLE 이 없습니다 — 펫 스프라이트가 빠진 채로 빌드됩니다."
+fi
 
 # 고정 identity가 있으면 그것으로, 없으면 ad-hoc 서명
 # (ad-hoc은 빌드마다 서명이 바뀌어 Keychain "항상 허용"이 유지되지 않음)

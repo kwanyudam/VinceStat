@@ -43,6 +43,18 @@ final class AppState {
     var warnThresholdPercent: Double {
         didSet { UserDefaults.standard.set(warnThresholdPercent, forKey: "warnThresholdPercent") }
     }
+    /// 데스크톱 펫 표시 여부. 끄면 창뿐 아니라 애니메이션 타이머까지 없앤다 —
+    /// 숨기기만 하면 꺼 둔 상태에서도 30fps 루프가 계속 돈다.
+    var petEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(petEnabled, forKey: "petEnabled")
+            petController.apply(enabled: petEnabled)
+        }
+    }
+
+    /// AppState 가 소유하고 펫 쪽은 `unowned` 로 되참조한다 (AppState 는 앱 수명 내내 산다).
+    /// `self` 를 넘겨야 해서 lazy 이고, 관찰 대상이 아니므로 @Observable 추적에서 뺀다.
+    @ObservationIgnored private lazy var petController = PetController(state: self)
 
     private let statsService = SystemStatsService()
     private let claudeService = ClaudeUsageService()
@@ -58,6 +70,7 @@ final class AppState {
         let savedThreshold = defaults.double(forKey: "warnThresholdPercent")
         warnThresholdPercent = savedThreshold > 0 ? savedThreshold : 80
         keychainDenied = defaults.bool(forKey: "keychainDenied")
+        petEnabled = defaults.bool(forKey: "petEnabled")
         storedToken = claudeService.storedToken()
         oauthToken = claudeService.oauthToken()
 
@@ -65,6 +78,13 @@ final class AppState {
         restartClaudeTimer()
         tickSystem()
         refreshClaude()
+
+        // 창 생성은 NSApplication 이 완전히 올라온 뒤로 미룬다 — AppState 는 App 구조체가
+        // 만들어지는 시점(applicationDidFinishLaunching 이전)에 초기화된다.
+        petDebugLog("init petEnabled=\(petEnabled) env=\(ProcessInfo.processInfo.environment["VINCESTAT_PET_REMAINING"] ?? "nil")")
+        if petEnabled {
+            Task { @MainActor in self.petController.apply(enabled: true) }
+        }
     }
 
     // MARK: - 메뉴바 텍스트
@@ -107,6 +127,24 @@ final class AppState {
         guard let window = usage?.fiveHour, usage?.source == .api else { return false }
         return window.utilizationPercent >= warnThresholdPercent
     }
+
+    // MARK: - 펫이 읽는 값
+
+    /// 펫 활력 계산용 5시간 블록 잔여 %.
+    /// 로컬 추정 모드에서는 플랜 한도 대비 %를 알 수 없으므로 `nil` — 펫은 정상 속도를 유지한다.
+    var petRemainingPercent: Double? {
+        // 개발용 주입: 잔량별로 펫이 어떻게 보이는지 확인할 때 쓴다 (`VINCESTAT_PET_REMAINING=25 swift run`).
+        if let raw = ProcessInfo.processInfo.environment["VINCESTAT_PET_REMAINING"],
+           let forced = Double(raw) {
+            return forced
+        }
+        guard let usage, usage.source == .api, let window = usage.fiveHour else { return nil }
+        return window.remainingPercent
+    }
+
+    /// 다음 자동 갱신 예정 시각. 반복 타이머의 다음 발화 시각이 곧 그 시각이다.
+    /// ↻ 수동 갱신은 타이머를 리셋하지 않으므로 이 값도 앞당겨지지 않는다.
+    var nextClaudeRefreshAt: Date? { claudeTimer?.fireDate }
 
     static func shortTokens(_ count: Int) -> String {
         switch count {
