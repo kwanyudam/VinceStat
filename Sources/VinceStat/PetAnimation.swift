@@ -58,6 +58,22 @@ func selectPetAnimation(_ input: PetAnimationInput) -> PetAnimationName {
     return .jumping
 }
 
+/// 고른 행 위에 덧입힐 상태 스킨을 정한다.
+///
+/// 졸음·얼음 스킨은 시트에 **정면 포즈에만** 구워져 있다. 그래서 조작·작업 때문에 다른 행이
+/// 재생되는 동안에는(호버로 돌아섰거나, 끌려가거나, 갱신 중이거나) 펫이 멀쩡해 보인다.
+/// 컨디션은 뭘 하고 있든 유지돼야 하므로, 그 행들에는 같은 스킨을 런타임에 입힌다.
+/// 이미 스킨이 구워진 행(`idle`·`waiting`)에는 다시 입히지 않는다 — 두 번 입으면 뭉갠다.
+func petSkin(for animation: PetAnimationName, vitality: PetVitality) -> PetSkin {
+    if vitality.isExhausted {
+        return animation == .waiting ? .none : .freeze
+    }
+    if vitality.isSluggish {
+        return animation == .idle ? .none : .sleep
+    }
+    return .none
+}
+
 /// 4pt 이상 수평으로 움직였을 때만 방향을 바꾼다 — 손떨림에 좌우로 파닥이지 않게.
 /// (Orca 의 `nextPetDragAnimation` 과 같은 규칙)
 func nextPetDragDirection(

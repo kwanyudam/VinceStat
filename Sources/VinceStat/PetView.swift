@@ -13,7 +13,8 @@ final class PetView: NSView {
     private let sheet: PetSpriteSheet
 
     private var frameIndex = 0
-    private var currentAnimation: PetAnimationName = .waving
+    private var currentAnimation: PetAnimationName = .jumping
+    private var currentSkin: PetSkin = .none
     private var frames: PetSpriteAnimation?
     private var frameTimer: Timer?
     private var pointerTimer: Timer?
@@ -78,17 +79,21 @@ final class PetView: NSView {
 
     /// 지금 나와야 할 애니메이션을 고르고, 바뀌었으면 첫 프레임부터 다시 재생한다.
     private func applyAnimation(force: Bool = false) {
+        let vitality = PetVitality(remainingPercent: state.petRemainingPercent)
         let wanted = selectPetAnimation(PetAnimationInput(
             dragging: dragging,
             dragDirection: dragDirection,
             hovering: hovering,
             refreshing: state.isRefreshing,
-            vitality: PetVitality(remainingPercent: state.petRemainingPercent)
+            vitality: vitality
         ))
-        guard force || wanted != currentAnimation else { return }
-        guard let resolved = sheet.resolved(wanted) else { return }
+        // 잔량이 임계값을 넘나들면 행은 그대로여도 스킨만 바뀔 수 있으므로 둘 다 본다.
+        let wantedSkin = petSkin(for: wanted, vitality: vitality)
+        guard force || wanted != currentAnimation || wantedSkin != currentSkin else { return }
+        guard let resolved = sheet.resolved(wanted, skin: wantedSkin) else { return }
 
         currentAnimation = wanted
+        currentSkin = wantedSkin
         frames = resolved
         frameIndex = 0
         scheduleNextFrame()

@@ -134,7 +134,8 @@ Sources/VinceStat/
 ├── PetView.swift             # 프레임 재생 + 마우스 조작 + AppState 읽기
 ├── PetSpriteSheet.swift      # spritesheet.png 를 애니메이션별 프레임으로 슬라이스
 ├── PetManifest.swift         # pet.json (.codex-pet 매니페스트) 파서
-├── PetAnimation.swift        # 상황 → 재생할 행 선택 (순수 함수)
+├── PetAnimation.swift        # 상황 → 재생할 행 + 덧입힐 스킨 선택 (순수 함수)
+├── PetSkin.swift             # 졸음·얼음 스킨을 런타임에 입히는 렌더러
 ├── PetHUD.swift              # 발밑 수치 패널 + 갱신 카운트다운
 ├── PetVitality.swift         # Claude 잔여 % → 재생 속도 배수 (순수 계산)
 ├── PetDebugLog.swift         # VINCESTAT_PET_DEBUG 진단 로그
@@ -213,6 +214,24 @@ on/off 하면 29%가 되는 순간에만 알아채는데, 그러면 "미리 알�
 
 시트의 행 이름은 Orca 펫 규약을 따른 것이라 여기서 쓰는 의미와 다르다 — 이름이 아니라 **실제 그림의
 방향과 스킨**을 기준으로 골랐다.
+
+### 없는 조합은 런타임에 만든다 (PetSkin)
+
+졸음·얼음 스킨은 시트에 **정면 포즈에만** 구워져 있다. 그래서 졸거나 얼어 있는 펫에 마우스를 올려
+뒷모습으로 돌아세우면 갑자기 멀쩡해 보이는 문제가 있었다. 시트를 다시 굽는 대신, 구울 때 쓴 것과
+같은 파라미터를 런타임에 적용해 없는 조합을 만든다 (`PetSkin.swift`).
+
+- 졸음: `desaturate(sat 0.4, bright 0.62)` + 떠오르는 "Zzz"
+- 얼음: `tint(desaturate(sat 0.35, bright 1.1), (170,215,250), 0.6)` + 각진 얼음 결정
+
+수치는 connor-pet `scripts/build_sheet.py` 에서 그대로 가져왔고, 정면 포즈에 적용해 구워진 행과
+나란히 비교해 거의 일치하는 것을 확인했다. 이미 스킨이 구워진 행(`idle`·`waiting`)에는 다시 입히지
+않는다 — 두 번 입으면 뭉갠다.
+
+한 가지 함정: Pillow 의 `ImageDraw` 는 도형을 오버레이에 **덮어쓰고** 마지막에 한 번만
+`alpha_composite` 한다. Core Graphics 에서 그대로 겹쳐 그리면 반투명 도형끼리 알파가 누적돼
+얼음 결정 안이 안 보일 만큼 불투명해진다. 그래서 별도 레이어에 `.copy` 블렌드로 그린 뒤 한 번만
+합성한다.
 
 ### 디버깅
 
